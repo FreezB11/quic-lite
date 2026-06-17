@@ -416,6 +416,41 @@ typedef struct {
     } u;
 } ql_frame_t;
 
+/*
+ * One directional key set for a single encryption level.
+ * Holds the AEAD key, the per-packet IV (nonce base), and the
+ * header-protection key (hp).
+ */
+typedef struct {
+    uint8_t  key[QL_AEAD_KEY_MAX_LEN];
+    uint8_t  iv[QL_AEAD_IV_MAX_LEN];
+    uint8_t  hp[QL_HP_KEY_MAX_LEN];
+    uint8_t  key_len;
+    uint8_t  iv_len;
+    uint8_t  hp_len;
+    bool     is_set;
+} ql_keys_t;
+
+/* Read + write keys for one encryption level */
+typedef struct {
+    ql_keys_t  read;   /* decryption */
+    ql_keys_t  write;  /* encryption */
+} ql_key_pair_t;
+
+/*
+ * Key update state — RFC 9001 6.
+ * We keep both the current and next key phases so we can decrypt
+ * packets that arrive using the new phase before we've fully rotated.
+ */
+typedef struct {
+    ql_key_pair_t  current;           /* keys for the active phase */
+    ql_key_pair_t  next;              /* keys derived ready for next phase */
+    bool           current_phase;     /* 0 or 1 — matches key_phase bit */
+    bool           update_pending;    /* we've triggered an update, not sent yet */
+    bool           peer_updated;      /* we saw the peer's key_phase flip */
+    uint64_t       update_sent_pn;    /* first pkt-num sent with new key */
+} ql_key_update_t;
+
 /**
  * @link: https://www.rfc-editor.org/rfc/rfc9000.html?#name-packet-formats
  */
