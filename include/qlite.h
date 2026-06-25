@@ -36,6 +36,48 @@ extern "C" {
 #include <unistd.h>
 #include <fcntl.h>
 
+/* helpers*/
+/* Write Varint — encodes val, advances pos, returns error on overflow */
+#define WV(val) \
+    do { int _n = ql_varint_encode(buf+pos, cap-pos, (uint64_t)(val)); \
+         if (_n < 0) return _n; \
+         pos += (size_t)_n; \
+    } while(0)
+/* Write Bytes — copies raw bytes, advances pos, returns error on overflow */
+#define WB(ptr, len) \
+    do { size_t _l = (size_t)(len); \
+         if (pos + _l > cap) return QLITE_ERR_BUF; \
+         memcpy(buf + pos, (ptr), _l); \
+         pos += _l; \
+    } while(0)
+
+#define TP_VARINT(id, val) \
+    do { if (tp_write_varint(buf, &pos, cap, (id), (val)) < 0) \
+        return QLITE_ERR_BUF; \
+    } while(0)
+#define TP_BYTES(id, data, len) \
+    do { if (tp_write_bytes(buf, &pos, cap, (id), (data), (len)) < 0) return QLITE_ERR_BUF; } while(0)
+#define TP_CID(id, cid) \
+    do { if (tp_write_cid(buf, &pos, cap, (id), (cid)) < 0) return QLITE_ERR_BUF; } while(0)
+
+#define RV(field)                                                          \
+    do {                                                                   \
+        ql_varint_t _v;                                                    \
+        int _n = ql_varint_decode(buf + pos, len - pos, &_v);             \
+        if (_n < 0 || pos + (size_t)_n > len) return QLITE_ERR_BUF;      \
+        (field) = (__typeof__(field))_v;                                   \
+        pos += (size_t)_n;                                                 \
+    } while (0)
+
+#define RB(dst, n)                                                         \
+    do {                                                                   \
+        size_t _l = (size_t)(n);                                           \
+        if (pos + _l > len) return QLITE_ERR_BUF;                         \
+        memcpy((dst), buf + pos, _l);                                      \
+        pos += _l;                                                         \
+    } while (0)
+
+
 /**
  * @link: https://www.rfc-editor.org/rfc/rfc9000.html#name-variable-length-integer-enc
  * QUIC variable-length integer (varint).  Wire encoding uses 2 MSBs of the
@@ -762,6 +804,74 @@ int  ql_varint_decode(const uint8_t *buf, size_t len, ql_varint_t *out){
     return (int)vlen;
 }
 
+/**
+ * Helpers
+ */
+/* Helper: write a varint-valued TP field */
+static int tp_write_varint(uint8_t *buf, size_t *pos, size_t cap,
+                             ql_tp_id_t id, uint64_t val)
+{
+    int id_n  = ql_varint_encode(buf + *pos, cap - *pos, (uint64_t)id);
+    if (id_n < 0) return id_n;
+    *pos += (size_t)id_n;
+
+    /* Compute value encoding to know length */
+    uint8_t tmp[8];
+    int val_n = ql_varint_encode(tmp, sizeof(tmp), val);
+    if (val_n < 0) return val_n;
+
+    int len_n = ql_varint_encode(buf + *pos, cap - *pos, (uint64_t)val_n);
+    if (len_n < 0) return len_n;
+    *pos += (size_t)len_n;
+
+    if (*pos + (size_t)val_n > cap) return QLITE_ERR_BUF;
+    memcpy(buf + *pos, tmp, (size_t)val_n);
+    *pos += (size_t)val_n;
+    return 0;
+}
+
+/* Helper: write a raw-bytes TP field */
+static int tp_write_bytes(uint8_t *buf, size_t *pos, size_t cap,
+                            ql_tp_id_t id, const uint8_t *data, size_t data_len)
+{
+    int id_n = ql_varint_encode(buf + *pos, cap - *pos, (uint64_t)id);
+    if (id_n < 0) return id_n;
+    *pos += (size_t)id_n;
+
+    int len_n = ql_varint_encode(buf + *pos, cap - *pos, (uint64_t)data_len);
+    if (len_n < 0) return len_n;
+    *pos += (size_t)len_n;
+
+    if (*pos + data_len > cap) return QLITE_ERR_BUF;
+    memcpy(buf + *pos, data, data_len);
+    *pos += data_len;
+    return 0;
+}
+
+/* Helper: write a CID-valued TP */
+static int tp_write_cid(uint8_t *buf, size_t *pos, size_t cap,
+                          ql_tp_id_t id, const ql_cid_t *cid)
+{
+    return tp_write_bytes(buf, pos, cap, id, cid->data, cid->len);
+}
+
+// /* Write n bytes of val into buf in big-endian order. */
+// static void ql__write_be(uint8_t *buf, uint64_t val, int n) {
+//     for (int i = n - 1; i >= 0; i--) {
+//         buf[i] = (uint8_t)(val & 0xFF);
+//         val >>= 8;
+//     }
+// }
+
+/* Bounds-checked varint read from buf[pos..len], advance pos. */
+static int ql__read_varint(const uint8_t *buf, size_t *pos, size_t len, ql_varint_t *out) {
+    if (*pos >= len) return QLITE_ERR_BUF;
+    int n = ql_varint_decode(buf + *pos, len - *pos, out);
+    if (n < 0) return n;
+    *pos += (size_t)n;
+    return n;
+}
+
 int  ql_pkt_num_encode(uint8_t *buf, ql_pkt_num_t full_pn,ql_pkt_num_t largest_acked){
     uint64_t n_unacked;
     int pn_len;
@@ -811,18 +921,6 @@ ql_pkt_num_t ql_pkt_num_decode(uint64_t truncated_pn, int pn_nbits,ql_pkt_num_t 
 
 int  ql_frame_encode(const ql_frame_t *frame, uint8_t *buf, size_t cap){
     size_t pos = 0; // this is the cursor in buffer
-
-    /* helpers*/
-    /* Write Varint — encodes val, advances pos, returns error on overflow */
-    #define WV(val) \
-        do { int _n = ql_varint_encode(buf+pos, cap-pos, (uint64_t)(val)); \
-             if (_n < 0) return _n; pos += (size_t)_n; } while(0)
-
-    /* Write Bytes — copies raw bytes, advances pos, returns error on overflow */
-    #define WB(ptr, len) \
-        do { size_t _l = (size_t)(len); \
-             if (pos + _l > cap) return QLITE_ERR_BUF; \
-             memcpy(buf + pos, (ptr), _l); pos += _l; } while(0)
 
     switch(frame->type){
         case QL_FRAME_PADDING:{
@@ -876,8 +974,8 @@ int  ql_frame_encode(const ql_frame_t *frame, uint8_t *buf, size_t cap){
         }
         case QL_FRAME_CRYPTO:{
             WV(0x06);
-            WV(frame->u.crypto.length);
             WV(frame->u.crypto.offset);
+            WV(frame->u.crypto.length);
             WB(frame->u.crypto.data, frame->u.crypto.length);
             return (int)pos;
         }
@@ -980,23 +1078,6 @@ int  ql_frame_encode(const ql_frame_t *frame, uint8_t *buf, size_t cap){
 int  ql_frame_decode(const uint8_t *buf, size_t len, ql_frame_t *out){
     if(!buf || !out || len == 0) return QLITE_ERR_ARGS;
     size_t pos = 0;
-
-#define RV(field)                                                          \
-    do {                                                                   \
-        ql_varint_t _v;                                                    \
-        int _n = ql_varint_decode(buf + pos, len - pos, &_v);             \
-        if (_n < 0 || pos + (size_t)_n > len) return QLITE_ERR_BUF;      \
-        (field) = (__typeof__(field))_v;                                   \
-        pos += (size_t)_n;                                                 \
-    } while (0)
-
-#define RB(dst, n)                                                         \
-    do {                                                                   \
-        size_t _l = (size_t)(n);                                           \
-        if (pos + _l > len) return QLITE_ERR_BUF;                         \
-        memcpy((dst), buf + pos, _l);                                      \
-        pos += _l;                                                         \
-    } while (0)
 
     // step 1: read the type varint — tells us which frame this is
     ql_varint_t type_vi;
@@ -1217,13 +1298,6 @@ int ql_tp_encode(const ql_transport_params_t *tp, uint8_t *buf, size_t cap) {
     if (!tp || !buf) return QLITE_ERR_ARGS;
     size_t pos = 0;
 
-#define TP_VARINT(id, val) \
-    do { if (tp_write_varint(buf, &pos, cap, (id), (val)) < 0) return QLITE_ERR_BUF; } while(0)
-#define TP_BYTES(id, data, len) \
-    do { if (tp_write_bytes(buf, &pos, cap, (id), (data), (len)) < 0) return QLITE_ERR_BUF; } while(0)
-#define TP_CID(id, cid) \
-    do { if (tp_write_cid(buf, &pos, cap, (id), (cid)) < 0) return QLITE_ERR_BUF; } while(0)
-
     if (tp->max_idle_timeout_ms)
         TP_VARINT(QL_TP_MAX_IDLE_TIMEOUT, tp->max_idle_timeout_ms);
 
@@ -1248,13 +1322,13 @@ int ql_tp_encode(const ql_transport_params_t *tp, uint8_t *buf, size_t cap) {
     if (tp->initial_max_streams_uni)
         TP_VARINT(QL_TP_INITIAL_MAX_STREAMS_UNI, tp->initial_max_streams_uni);
 
-    if (tp->ack_delay_exponent != QL_DEFAULT_ACK_DELAY_EXP)
+    if (tp->ack_delay_exponent != 0 && tp->ack_delay_exponent != QL_DEFAULT_ACK_DELAY_EXP)
         TP_VARINT(QL_TP_ACK_DELAY_EXPONENT, tp->ack_delay_exponent);
 
-    if (tp->max_ack_delay_ms != QL_DEFAULT_MAX_ACK_DELAY_MS)
+    if (tp->max_ack_delay_ms != 0 && tp->max_ack_delay_ms != QL_DEFAULT_MAX_ACK_DELAY_MS)
         TP_VARINT(QL_TP_MAX_ACK_DELAY, tp->max_ack_delay_ms);
 
-    if (tp->active_cid_limit != QL_DEFAULT_ACTIVE_CID_LIMIT)
+    if (tp->active_cid_limit != 0 && tp->active_cid_limit != QL_DEFAULT_ACTIVE_CID_LIMIT)
         TP_VARINT(QL_TP_ACTIVE_CONNECTION_ID_LIMIT, tp->active_cid_limit);
 
     if (tp->disable_active_migration) {
@@ -1277,10 +1351,6 @@ int ql_tp_encode(const ql_transport_params_t *tp, uint8_t *buf, size_t cap) {
 
     if (tp->has_retry_src_cid && tp->retry_src_cid.len)
         TP_CID(QL_TP_RETRY_SOURCE_CID, &tp->retry_src_cid);
-
-#undef TP_VARINT
-#undef TP_BYTES
-#undef TP_CID
 
     return (int)pos;
 }
