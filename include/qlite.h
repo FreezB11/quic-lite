@@ -9,7 +9,7 @@
  *   RFC 9001  Using TLS to Secure QUIC
  *   RFC 9002  QUIC Loss Detection and Congestion Control
  */
-
+#define _POSIX_C_SOURCE 199309L
 #ifndef QLITE_H
 #define QLITE_H
 
@@ -853,6 +853,16 @@ static int tp_write_cid(uint8_t *buf, size_t *pos, size_t cap,
                           ql_tp_id_t id, const ql_cid_t *cid)
 {
     return tp_write_bytes(buf, pos, cap, id, cid->data, cid->len);
+}
+
+/*
+ * ql_now_ms — monotonic clock in milliseconds.
+ * Uses CLOCK_MONOTONIC to avoid wall-clock jumps.
+ */
+uint64_t ql_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)(ts.tv_nsec / 1000000ULL);
 }
 
 // /* Write n bytes of val into buf in big-endian order. */
