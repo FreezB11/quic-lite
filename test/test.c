@@ -4,6 +4,7 @@
 #include "variant.test.h"
 #include "tp.test.h"
 #include "udp.test.h"
+#include "crypto.test.h"
 
 int ql_tests_run = 0;
 
@@ -63,17 +64,38 @@ int main(void){
     /** @todo we need a null arg handler*/
     // RUN_TEST(test_udp_recv_rejects_null_args);
     // RUN_TEST(test_udp_send_rejects_null_buf);
-    
     RUN_TEST(test_udp_send_rejects_zero_len);
     RUN_TEST(test_udp_send_returns_full_length_on_success);
-
     RUN_TEST(test_udp_send_recv_roundtrip);
     RUN_TEST(test_udp_recv_reports_correct_source_address);
     RUN_TEST(test_udp_recv_again_after_drain);
-
     RUN_TEST(test_now_ms_is_nonzero);
     RUN_TEST(test_now_ms_is_monotonic_nondecreasing);
     RUN_TEST(test_now_ms_advances_after_sleep);
+
+    /* crypto - aead & header_pkt*/
+    /* AEAD */
+    RUN_TEST(test_aead_seal_basic);
+    RUN_TEST(test_aead_seal_open_roundtrip);
+    RUN_TEST(test_aead_pkt_num_uniqueness);
+    RUN_TEST(test_aead_tampered_ciphertext_rejected);
+    RUN_TEST(test_aead_tampered_tag_rejected);
+    RUN_TEST(test_aead_tampered_aad_rejected);
+    RUN_TEST(test_aead_wrong_pkt_num_rejected);
+    RUN_TEST(test_aead_empty_plaintext);
+    RUN_TEST(test_aead_buf_too_small_seal);
+    RUN_TEST(test_aead_buf_too_small_open);
+    RUN_TEST(test_aead_null_key_rejected);
+    RUN_TEST(test_aead_key_not_set_rejected);
+    RUN_TEST(test_aead_256_roundtrip);
+    RUN_TEST(test_aead_rfc9001_vectors);
+    /* Header Protection */
+    RUN_TEST(test_hp_protect_remove_roundtrip_long);
+    RUN_TEST(test_hp_protect_remove_roundtrip_short);
+    RUN_TEST(test_hp_idempotent_double_remove);
+    RUN_TEST(test_hp_different_samples_different_masks);
+    RUN_TEST(test_hp_null_args_rejected);
+    RUN_TEST(test_hp_rfc9001_vectors);
 
     ql_test_summary();
     return 0;
