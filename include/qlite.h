@@ -1281,7 +1281,92 @@ int  ql_frame_decode(const uint8_t *buf, size_t len, ql_frame_t *out){
     }
 }
 
-int  ql_udp_socket(const char *bind_addr, uint16_t port);
+/*
+ * ql_udp_socket — creates a non-blocking UDP socket bound to bind_addr:port.
+ *
+ * bind_addr may be NULL or "" to bind to INADDR_ANY / in6addr_any.
+ * port = 0 lets the OS assign an ephemeral port.
+ *
+ * Returns fd >= 0 on success, or QLITE_ERR_INTERNAL on failure
+ * (check errno for the OS reason).
+ *
+ * Steps:
+ *   1. getaddrinfo to resolve bind_addr (supports IPv4 and IPv6)
+ *   2. socket(AF_INET/6, SOCK_DGRAM, IPPROTO_UDP)
+ *   3. SO_REUSEADDR
+ *   4. O_NONBLOCK
+ *   5. bind()
+ */
+int  ql_udp_socket(const char *bind_addr, uint16_t port){
+    int fd = -1;
+    int one = 1;
+    int flags;
+
+    /*
+        try ipv6 first (dual-stack on linux handles ipv4 too)
+        fall back to ipv4 if ipv6 is not available
+    */
+   fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+   if(fd >=0){
+    /* allow ipv4 client on the ipv6*/
+    int ipv6_only = 0;
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only));
+    
+    struct sockaddr_in6 addr6;
+    memset(&addr6, 0, sizeof(addr6));
+    addr6.sin6_family = AF_INET6;
+    addr6.sin6_port = htons(port);
+
+    if(bind_addr && bind_addr[0]){
+        if(inet_pton(AF_INET6, bind_addr, &addr6.sin6_addr) != 1){
+            close(fd);
+            fd = -1;
+            goto try_ipv4;
+        }
+    }else{
+        addr6.sin6_addr = in6addr_any;
+    }
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    flags = fctnl(fd, F_GETFL, 0);
+    if(flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+        bind(fd, (struct sockaddr *)&addr6, sizeof(addr6)) != 0){
+            close(fd);
+            fd = -1;
+    }else{
+        return fd;
+    }
+   }
+
+try_ipv4:
+   fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) return QLITE_ERR_INTERNAL;
+
+    struct sockaddr_in addr4;
+    memset(&addr4, 0, sizeof(addr4));
+    addr4.sin_family = AF_INET;
+    addr4.sin_port   = htons(port);
+
+    if (bind_addr && bind_addr[0]) {
+        if (inet_pton(AF_INET, bind_addr, &addr4.sin_addr) != 1) {
+            close(fd);
+            return QLITE_ERR_INTERNAL;
+        }
+    } else {
+        addr4.sin_addr.s_addr = INADDR_ANY;
+    }
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+        bind(fd, (struct sockaddr *)&addr4, sizeof(addr4)) != 0) {
+        close(fd);
+        return QLITE_ERR_INTERNAL;
+    }
+
+    return fd;
+}
+
 int  ql_udp_send(int fd, const struct sockaddr *addr, socklen_t addrlen,
                   const uint8_t *buf, size_t len);
 int  ql_udp_recv(int fd, uint8_t *buf, size_t cap,
