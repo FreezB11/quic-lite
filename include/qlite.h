@@ -1517,11 +1517,67 @@ done:
     return ret;
 }
 
+/*
+ * RFC 9001 5.4.3 — Header protection using AES-ECB.
+ * mask = AES-ECB(hp_key, sample)[0:5]
+ * For long headers: first_byte mask = mask[0] & 0x0F
+ * For short headers: first_byte mask = mask[0] & 0x1F
+ * pkt_num bytes: XOR with mask[1..pkt_num_len]
+ *
+ * hdr layout expected: hdr[0] = first_byte, hdr[hdr_len - pkt_num_len ..] = pkt_num bytes
+ * We detect long vs short by the high bit of hdr[0].
+ */
+static int ql__hp_apply(const ql_keys_t *key, uint8_t *hdr, size_t hdr_len,
+                         const uint8_t *sample, bool protect)
+{
+    if (!key || !key->is_set || !hdr || !sample || hdr_len < 2)
+        return QLITE_ERR_ARGS;
+
+    AES_KEY aes;
+    if (AES_set_encrypt_key(key->hp, key->hp_len * 8, &aes) != 0)
+        return QLITE_ERR_CRYPTO;
+
+    uint8_t mask[AES_BLOCK_SIZE];
+    AES_ecb_encrypt(sample, mask, &aes, AES_ENCRYPT);
+
+    uint8_t first = hdr[0];
+    bool is_long  = (first & 0x80) != 0;
+
+    uint8_t pn_len;
+    if (protect) {
+        pn_len = (first & 0x03) + 1;
+    } else {
+        uint8_t first_unmasked = first ^ (mask[0] & (is_long ? 0x0F : 0x1F));
+        pn_len = (first_unmasked & 0x03) + 1;
+    }
+
+    if (hdr_len < (size_t)(1 + pn_len))
+        return QLITE_ERR_BUF;
+
+    /* apply mask to first byte */
+    hdr[0] ^= mask[0] & (is_long ? 0x0F : 0x1F);
+
+    /* apply mask to packet number bytes (at end of hdr) */
+    uint8_t *pn = hdr + hdr_len - pn_len;
+    for (uint8_t i = 0; i < pn_len; i++)
+        pn[i] ^= mask[1 + i];
+
+    (void)protect;
+    return QLITE_OK;
+}
+
 /* Header protection (RFC 9001 5.4) */
 int  ql_hp_protect(const ql_keys_t *key, uint8_t *hdr, size_t hdr_len,
-                    const uint8_t *sample);
+                    const uint8_t *sample)
+{
+    return ql__hp_apply(key, hdr, hdr_len, sample, true);
+}
+
 int  ql_hp_remove(const ql_keys_t *key, uint8_t *hdr, size_t hdr_len,
-                   const uint8_t *sample);
+                   const uint8_t *sample)
+{
+    return ql__hp_apply(key, hdr, hdr_len, sample, false);
+}
 
 int  ql_pkt_encode(const ql_pkt_hdr_t *hdr, const ql_keys_t *key,
                     const uint8_t *payload, size_t payload_len,
